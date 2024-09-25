@@ -1,12 +1,15 @@
+from pathlib import Path
 import pytesseract as pyt
 import cv2
 import re
-import matplotlib
 import matplotlib.pyplot as plt
 import tkinter as tk
-from tkinter import messagebox
+import numpy as np
+from tkinter import messagebox, simpledialog
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from tkinter import filedialog
+from PIL import Image
+import logging
 
 
 class Options:
@@ -31,17 +34,22 @@ class TitleInputDialog(tk.Toplevel):
 
         self.entries = []
         for i, path in enumerate(self.image_paths):
-            tk.Label(self, text=f"Title for {path.split('/')[-1]}:", font=("Helvetica", 12)).grid(row=i, column=0, padx=10, pady=5)
-            entry = tk.Entry(self, font=("Helvetica", 12))
+            tk.Label(self, text=f"Title for {path.name}:").grid(row=i, column=0, padx=10,
+                                                                pady=5)  # Use path.name for the file name only
+            entry = tk.Entry(self)
             entry.grid(row=i, column=1, padx=10, pady=5)
             self.entries.append(entry)
 
-        self.submit_button = tk.Button(self, text="Submit", font=("Helvetica", 12), command=self.submit)
+        self.submit_button = tk.Button(self, text="Submit", command=self.submit)
         self.submit_button.grid(row=len(self.image_paths), column=0, columnspan=2, pady=10)
 
     def submit(self):
         self.titles = [entry.get() for entry in self.entries]
         self.destroy()
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def parse_text(text, name_input):
@@ -66,6 +74,9 @@ def parse_text(text, name_input):
                 if group_number not in group_numbers:
                     group_numbers.append(group_number)
 
+            if not (day_hours_match or type_group_match):
+                logger.warning(f"Unmatched line in section: {line}")
+
         if day and hours and type_of_course:
             option = Options(name=name_input, type_of_course=type_of_course, day=day, hours=hours,
                              group_numbers=group_numbers)
@@ -74,28 +85,75 @@ def parse_text(text, name_input):
     return options_list
 
 
+logging.basicConfig(level=logging.INFO)
+
+
 def process_image(image_path):
+    image_path = Path(image_path)
+
+    if not image_path.exists():
+        raise FileNotFoundError(f"The image file does not exist: {image_path}")
+
+    try:
+        # Use Pillow to open the image (better support for various image formats)
+        with Image.open(image_path) as img:
+            # Convert to RGB if the image is in a different mode
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            # Convert to numpy array
+            img_array = np.array(img)
+    except Exception as e:
+        logging.error(f"Failed to load the image {image_path}: {str(e)}")
+        return ""
+
+    # Convert to grayscale
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+
+    # Apply multiple preprocessing techniques
+    denoised = cv2.fastNlMeansDenoising(gray)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(denoised)
+
+    # Try different thresholding methods
+    _, binary_otsu = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    binary_adaptive = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+
+    # Resize the image (scaling up can sometimes improve OCR results)
+    height, width = binary_adaptive.shape
+    scale_factor = 1.5
+    new_width = int(width * scale_factor)
+    new_height = int(height * scale_factor)
+    resized = cv2.resize(binary_adaptive, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+
+    # Configure Tesseract OCR
     pyt.pytesseract.tesseract_cmd = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
-    img = cv2.imread(image_path)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    denoised = cv2.GaussianBlur(gray, (5, 5), 0)
-    thresh = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
 
-    height, width = thresh.shape
-    new_width = int(width * 1.5)
-    new_height = int(height * 1.5)
-    resized = cv2.resize(thresh, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+    # Try OCR with different preprocessing results
+    text_results = []
+    for img in [resized, cv2.resize(binary_otsu, (new_width, new_height), interpolation=cv2.INTER_CUBIC)]:
+        try:
+            text = pyt.image_to_string(img, lang='heb', config='--psm 6 --oem 3')
+            text_results.append(text)
+        except Exception as e:
+            logging.error(f"OCR failed for {image_path}: {str(e)}")
 
-    text = pyt.image_to_string(resized, lang='heb', config='--psm 6')
-    return text
+    # Choose the result with more content
+    final_text = max(text_results, key=len) if text_results else ""
+
+    if not final_text.strip():
+        logging.warning(f"No text extracted from {image_path}")
+
+    return final_text
 
 
 def plot_schedule(options_list, canvas, fig, ax):
     days_mapping = {'יום א': 0, 'יום ב': 1, 'יום ג': 2, 'יום ד': 3, 'יום ה': 4, 'יום ו': 5}
     plotted_blocks = []
 
+    # Clear previous plot
     ax.clear()
 
+    # Organize visible options by their day and check for collisions
     visible_options_by_day = {}
     for option in options_list:
         if option.visible:
@@ -113,42 +171,41 @@ def plot_schedule(options_list, canvas, fig, ax):
                     "option": option
                 })
 
+    # Plot all visible options
     for day_index, options in visible_options_by_day.items():
         num_options = len(options)
-        block_width = 0.8 / num_options
+        block_width = 0.8 / num_options  # Divide the available width by the number of overlapping options
         for i, option_info in enumerate(options):
             start_hour = option_info['start_hour']
             end_hour = option_info['end_hour']
             option = option_info['option']
 
+            # Offset each block horizontally
             x_offset = day_index + (i * block_width)
 
-            course_type_display = option.type_of_course[::-1]
+            # Fix Hebrew text for course type (reverse course type but keep the title intact)
+            course_type_display = option.type_of_course[::-1]  # Reverse the Hebrew text for course type
             option_name_display = option.name[::-1]
 
-            # Set modern colors with transparency
+            # Set color based on course type
             color = 'tab:blue' if option.type_of_course == 'שעור' else 'tab:green' if option.type_of_course == 'תרגיל' else 'tab:orange'
-            color = matplotlib.colormaps.get_cmap('Pastel1')(i / num_options)
 
-            # Plot the block with a cleaner, modern feel
-            ax.broken_barh([(x_offset, block_width)], (start_hour, end_hour - start_hour), facecolors=color, alpha=0.75)
+            # Plot the block
+            ax.broken_barh([(x_offset, block_width)], (start_hour, end_hour - start_hour), facecolors=color)
 
             # Add text for group number, course type, and photo title in the plot
             ax.text(x_offset + block_width / 2, start_hour + (end_hour - start_hour) / 2,
                     f"{course_type_display}\nGroup: {', '.join(option.group_numbers)}\n{option_name_display}",
-                    va='center', ha='center', color='black', fontsize=10, weight='bold')
+                    va='center', ha='center', color='white', fontsize=10, weight='bold')
 
-    # Modernize gridlines and labels
     ax.set_xticks(range(6))
-    ax.set_xticklabels(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'], fontweight='bold')
+    ax.set_xticklabels(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'])
     ax.set_yticks(range(8, 22))
     ax.set_ylim(8, 22)
-    ax.set_ylabel('Time', fontsize=12, fontweight='bold')
-    ax.set_xlabel('Day', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Time')
+    ax.set_xlabel('Day')
 
-    ax.grid(True, linestyle='--', color='lightgray')
-    ax.set_facecolor('#f4f4f4')  # Light background for the plot
-
+    ax.grid(True)
     canvas.draw()
 
 
@@ -181,10 +238,6 @@ def create_buttons(button_frame, grouped_options, all_options_list, canvas, fig,
         'מעבדה': 'orange'
     }
 
-    # Add the photo title above the buttons for the current image
-    photo_title_label = tk.Label(button_frame, text=photo_title, font=("Helvetica", 14, "bold"))
-    photo_title_label.grid(row=0, column=column, padx=10, pady=10)
-
     row = 1  # Start at row 1, because row 0 is the title
 
     for course_type, options in grouped_options.items():
@@ -196,10 +249,13 @@ def create_buttons(button_frame, grouped_options, all_options_list, canvas, fig,
         for option in options:
             button_text = f"{option.type_of_course} (Group {', '.join(option.group_numbers)})"
             toggle_button = tk.Button(button_frame, text=button_text, bg=course_colors[course_type], width=20,
-                                      font=("Helvetica", 10), relief="groove", bd=2,
                                       command=lambda opt=option: toggle_option_visibility(opt, all_options_list, canvas, fig, ax))
-            toggle_button.grid(row=row, column=column, padx=10, pady=2, ipadx=10, ipady=5)
+            toggle_button.grid(row=row, column=column, padx=10, pady=2)
             row += 1
+
+    # Add the photo title above the buttons for the current image
+    photo_title_label = tk.Label(button_frame, text=photo_title, font=("Helvetica", 14, "bold"))
+    photo_title_label.grid(row=0, column=column, padx=10, pady=5)
 
 
 def main():
@@ -209,6 +265,9 @@ def main():
     # Ask the user to select multiple image files
     image_paths = filedialog.askopenfilenames(title="Select images for processing",
                                               filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp")])
+
+    # Use Pathlib to handle file paths with Hebrew characters or non-ASCII characters
+    image_paths = [Path(image_path) for image_path in image_paths]
 
     if not image_paths:
         messagebox.showerror("Error", "No images selected!")
@@ -277,4 +336,5 @@ def main():
     root.mainloop()
 
 
+# Example usage
 main()
