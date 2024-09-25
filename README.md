@@ -39,7 +39,7 @@ The schedule will be displayed with an option to toggle course visibility.
 ### Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/course-schedule.git
+git clone https://github.com/Eladti/course-schedule.git
 cd your-repository-name
 
 
