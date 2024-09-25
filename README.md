@@ -1,4 +1,4 @@
-# Course Schedule OCR Application
+# BGU Course Scheduler
 
 This project is a course scheduling application that reads course schedules from images (in Hebrew), processes them using OCR, and displays the courses in a graphical weekly schedule format. It allows users to visualize their courses, manage multiple schedules, and toggle course visibility.
 
@@ -39,7 +39,7 @@ The schedule will be displayed with an option to toggle course visibility.
 ### Clone the Repository
 
 ```bash
-git clone https://github.com/Eladti/course-schedule.git
-cd your-repository-name
+git clone https://github.com/Eladti/BGU-Course-Scheduler.git
+cd BGU-Course-Scheduler
 
 
